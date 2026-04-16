@@ -2681,22 +2681,55 @@ if(fbForm) fbForm.addEventListener('submit',async(e)=>{
 function confirmReset(){
   document.getElementById('reset-overlay').hidden = false;
 }
-function executeReset(){
-  /* Clear all stored expo data */
+
+async function atDeleteAll(table){
+  try{
+    const records = await atGet(table);
+    if(!records.length) return;
+    /* Airtable allows batch deletes of up to 10 at a time */
+    for(let i=0; i<records.length; i+=10){
+      const batch = records.slice(i,i+10);
+      const params = batch.map(r=>`records[]=${r.id}`).join('&');
+      await fetch(`${AT_URL}/${encodeURIComponent(table)}?${params}`,{
+        method:'DELETE',
+        headers:{'Authorization':`Bearer ${AT_TOKEN}`}
+      });
+    }
+  }catch(e){ console.warn('Airtable delete failed', table, e); }
+}
+
+async function executeReset(){
+  /* Lock button and show progress */
+  const confirmBtn = document.querySelector('[onclick="executeReset()"]');
+  if(confirmBtn){ confirmBtn.disabled=true; confirmBtn.textContent='Clearing…'; }
+
+  /* Delete all records from Airtable first — otherwise sync restores them */
+  await Promise.all([
+    atDeleteAll('power_bookings'),
+    atDeleteAll('blitz_bookings'),
+    atDeleteAll('excitement_clicks'),
+    atDeleteAll('feedback')
+  ]);
+
+  /* Clear localStorage */
   localStorage.removeItem('pc_power_bookings');
   localStorage.removeItem('pc_blitz_bookings');
   localStorage.removeItem('pc_excitement');
   localStorage.removeItem('pc_feedback');
-  /* Close modal */
+
+  /* Close modal and restore button */
   document.getElementById('reset-overlay').hidden = true;
-  /* Zero all flame counts visually on the roadmap tab */
+  if(confirmBtn){ confirmBtn.disabled=false; confirmBtn.textContent='Yes, reset everything'; }
+
+  /* Zero flame counts visually */
   document.querySelectorAll('.rmc__buzz__count').forEach(el => el.textContent = '0');
-  /* Re-render dashboard to show zeroed state */
+
+  /* Re-render */
   renderDashboard();
-  /* Re-render bookings tab tiles */
   renderAllStaff(currentBkDay);
   renderBlitzDays();
-  /* Visual confirmation */
+
+  /* Visual confirmation on reset button */
   const btn = document.getElementById('dash-reset-btn');
   if(btn){
     const orig = btn.textContent;
@@ -2704,11 +2737,9 @@ function executeReset(){
     btn.style.background = '#f0fdf4';
     btn.style.borderColor = '#bbf7d0';
     btn.style.color = '#166534';
-    setTimeout(() => {
+    setTimeout(()=>{
       btn.textContent = orig;
-      btn.style.background = '';
-      btn.style.borderColor = '';
-      btn.style.color = '';
+      btn.style.background=''; btn.style.borderColor=''; btn.style.color='';
     }, 2500);
   }
 }
