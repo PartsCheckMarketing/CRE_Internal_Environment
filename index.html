@@ -2019,7 +2019,7 @@
     <div>
       <div class="eyebrow">Staff Only · Live Analytics</div>
       <h1 class="sec-title">What's <em>resonating.</em></h1>
-      <p class="sec-sub">Real-time snapshot of which roadmap features are generating excitement and what feedback customers are leaving at the expo. Data is stored locally on this device.</p>
+      <p class="sec-sub">Real-time snapshot of bookings, feature excitement, and customer feedback across all devices at the stand. Data syncs to Airtable — refresh to pull the latest from every tablet.</p>
     </div>
     <button class="dash-reset-btn" id="dash-reset-btn" onclick="confirmReset()" aria-label="Reset all expo data" style="display:none">
       🗑 Reset all data
@@ -2090,7 +2090,7 @@
         <div class="dash-section__title">📅 Expo Bookings</div>
         <div class="dash-section__sub">All Power Sessions and Blitz registrations captured at the stand.</div>
       </div>
-      <button class="dash-refresh" onclick="renderDashboard()" aria-label="Refresh dashboard">↻ Refresh</button>
+      <button class="dash-refresh" onclick="syncFromAirtable().then(()=>renderDashboard())" aria-label="Refresh dashboard">↻ Sync &amp; Refresh</button>
     </div>
     <div class="dash-bk-stats">
       <div class="dash-bk-stat">
@@ -2120,6 +2120,80 @@
 </main>
 
 <script>
+/* ══════════════════════════════════════════════════════════
+   AIRTABLE — persistent cross-device storage
+   ══════════════════════════════════════════════════════════ */
+const AT_TOKEN = 'patDLBvkevb0fF8K3.c8f642b24a7df94e4059d4d0ac8ec77dc594412df98f8282ef54e7a87379684e';
+const AT_BASE  = 'appesT4b2E6XjuYDy';
+const AT_URL   = `https://api.airtable.com/v0/${AT_BASE}`;
+
+async function atPost(table, fields){
+  try{
+    const r = await fetch(`${AT_URL}/${encodeURIComponent(table)}`,{
+      method:'POST',
+      headers:{'Authorization':`Bearer ${AT_TOKEN}`,'Content-Type':'application/json'},
+      body:JSON.stringify({fields})
+    });
+    if(!r.ok) console.warn('Airtable write error', table, await r.text());
+  }catch(e){ console.warn('Airtable write failed', table, e); }
+}
+
+async function atGet(table){
+  try{
+    const r = await fetch(`${AT_URL}/${encodeURIComponent(table)}?maxRecords=1000`,{
+      headers:{'Authorization':`Bearer ${AT_TOKEN}`}
+    });
+    const d = await r.json();
+    return d.records||[];
+  }catch(e){ console.warn('Airtable read failed', table, e); return []; }
+}
+
+async function syncFromAirtable(){
+  /* Power bookings */
+  const powerRecs = await atGet('power_bookings');
+  if(powerRecs.length){
+    const existing = getPowerBookings();
+    let changed = false;
+    powerRecs.forEach(r=>{
+      const f=r.fields;
+      if(f.SessionId && f.Name && !existing[f.SessionId]){
+        existing[f.SessionId]={name:f.Name,email:f.Email||'',business:f.Business||'',ts:f.Timestamp||''};
+        changed=true;
+      }
+    });
+    if(changed) savePowerBookings(existing);
+  }
+
+  /* Blitz bookings */
+  const blitzRecs = await atGet('blitz_bookings');
+  if(blitzRecs.length){
+    const existing = getBlitzBookings();
+    let changed = false;
+    blitzRecs.forEach(r=>{
+      const f=r.fields;
+      if(f.SessionId && f.Name){
+        if(!existing[f.SessionId]) existing[f.SessionId]=[];
+        const dup=existing[f.SessionId].some(b=>b.email===(f.Email||''));
+        if(!dup){ existing[f.SessionId].push({name:f.Name,email:f.Email||'',ts:f.Timestamp||''}); changed=true; }
+      }
+    });
+    if(changed) saveBlitzBookings(existing);
+  }
+
+  /* Excitement clicks — Airtable record count is the source of truth */
+  const clickRecs = await atGet('excitement_clicks');
+  if(clickRecs.length){
+    const counts={};
+    clickRecs.forEach(r=>{ const id=r.fields.Feature; if(id) counts[id]=(counts[id]||0)+1; });
+    const existing=getExcitement();
+    let changed=false;
+    Object.entries(counts).forEach(([id,cnt])=>{
+      if(cnt>(existing[id]||0)){ existing[id]=cnt; changed=true; }
+    });
+    if(changed){ saveExcitement(existing); initBuzzCounts(); }
+  }
+}
+
 /* ── TABS ── */
 const tabs   = document.querySelectorAll('.tab');
 const panels = document.querySelectorAll('.panel');
@@ -2556,6 +2630,9 @@ function buzz(featureId, btn){
   countEl.textContent=d[featureId];
   btn.classList.add('fired');
   setTimeout(()=>btn.classList.remove('fired'),900);
+  /* Write to Airtable */
+  const meta=FEATURE_META[featureId]||{name:featureId};
+  atPost('excitement_clicks',{Feature:featureId,FeatureName:meta.name,Timestamp:new Date().toLocaleString('en-AU')});
 }
 
 function initBuzzCounts(){
@@ -2583,6 +2660,8 @@ if(fbForm) fbForm.addEventListener('submit',async(e)=>{
   const ts=new Date().toLocaleString('en-AU');
   /* Save locally to dashboard */
   addFeedback({name,type,text,ts});
+  /* Airtable */
+  atPost('feedback',{Role:type,Message:name?`[${name}] ${text}`:text,Timestamp:ts});
   /* Also send to Formspree */
   try{
     await fetch('https://formspree.io/f/mojpdayz',{
@@ -3059,6 +3138,21 @@ document.getElementById('bk-power-form').addEventListener('submit', async e => {
   d[pendingPowerSlot] = booking;
   savePowerBookings(d);
 
+  /* Parse slot ID for readable Airtable fields: ps-trudy-d0-1100 */
+  const _sp = pendingPowerSlot.match(/ps-(\w+)-d(\d+)-(\d{2})(\d{2})/);
+  const _staffKey = _sp ? _sp[1] : '';
+  const _dayIdx2  = _sp ? parseInt(_sp[2]) : 0;
+  const _timeStr  = _sp ? fmtTime12(`${_sp[3]}:${_sp[4]}`) : '';
+  const _dayStr   = EXPO_DAYS[_dayIdx2] ? EXPO_DAYS[_dayIdx2].date : '';
+
+  /* Airtable */
+  atPost('power_bookings',{
+    Name: name, Email: email,
+    Staff: STAFF_NAMES[_staffKey]||_staffKey,
+    Day: _dayStr, Time: _timeStr,
+    SessionId: pendingPowerSlot, Timestamp: booking.ts
+  });
+
   /* Formspree */
   try{
     await fetch('https://formspree.io/f/mojpdayz',{
@@ -3113,6 +3207,19 @@ document.getElementById('bk-blitz-form').addEventListener('submit', async e => {
   d[pendingBlitzId].push(booking);
   saveBlitzBookings(d);
 
+  /* Parse blitz ID for readable Airtable fields: blitz-d0-1300 */
+  const _bp = pendingBlitzId.match(/blitz-d(\d+)-(\d{2})(\d{2})/);
+  const _bDayIdx = _bp ? parseInt(_bp[1]) : 0;
+  const _bTime   = _bp ? fmtTime12(`${_bp[2]}:${_bp[3]}`) : '';
+  const _bDay    = EXPO_DAYS[_bDayIdx] ? EXPO_DAYS[_bDayIdx].date : '';
+
+  /* Airtable */
+  atPost('blitz_bookings',{
+    Name: name, Email: email,
+    Day: _bDay, Time: _bTime,
+    SessionId: pendingBlitzId, Timestamp: booking.ts
+  });
+
   /* Formspree */
   try{
     await fetch('https://formspree.io/f/mojpdayz',{
@@ -3137,12 +3244,20 @@ function initBookingsTab(){
   renderBlitzDays();
 }
 
-/* Re-render when tab is clicked */
-document.querySelector('[data-tab="bookings"]').addEventListener('click', initBookingsTab);
+/* Re-render when tab is clicked — sync from Airtable first */
+document.querySelector('[data-tab="bookings"]').addEventListener('click', async()=>{
+  await syncFromAirtable();
+  initBookingsTab();
+});
+
+/* Sync when dashboard tab is clicked */
+document.querySelector('[data-tab="dashboard"]').addEventListener('click', async()=>{
+  await syncFromAirtable();
+  if(staffLoggedIn) renderDashboard();
+});
 
 /* Render immediately */
 initBookingsTab();
-
 
 /* Init on load */
 initBuzzCounts();
@@ -3151,6 +3266,12 @@ initBuzzCounts();
 calcRep();
 sizeHero('r-total');
 document.querySelectorAll('.slider').forEach(fill);
+
+/* Background sync from Airtable on page load */
+syncFromAirtable().then(()=>{
+  initBookingsTab();
+  initBuzzCounts();
+});
 
 </script>
 </body>
